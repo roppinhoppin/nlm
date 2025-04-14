@@ -30,7 +30,7 @@ go build -o nlm ./cmd/nlm
 go install ./cmd/nlm
 
 # Or manually install to a location in your PATH
-# sudo cp nlm /usr/local/bin/
+# cp nlm $HOME/go/bin/
 ```
 
 After installation, verify that the command is accessible:

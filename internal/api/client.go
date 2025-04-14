@@ -12,10 +12,10 @@ import (
 	"strings"
 
 	"github.com/davecgh/go-spew/spew"
-	pb "github.com/tmc/nlm/gen/notebooklm/v1alpha1"
-	"github.com/tmc/nlm/internal/batchexecute"
-	"github.com/tmc/nlm/internal/beprotojson"
-	"github.com/tmc/nlm/internal/rpc"
+	pb "github.com/roppinhoppin/nlm/gen/notebooklm/v1alpha1"
+	"github.com/roppinhoppin/nlm/internal/batchexecute"
+	"github.com/roppinhoppin/nlm/internal/beprotojson"
+	"github.com/roppinhoppin/nlm/internal/rpc"
 )
 
 type Notebook = pb.Project
