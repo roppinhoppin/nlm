@@ -245,8 +245,75 @@ func decodeChunkedResponse(raw string) ([]Response, error) {
 		return nil, fmt.Errorf("empty response after trimming prefix")
 	}
 
+	// Try the regular approach first
 	var responses []Response
+	var allChunks strings.Builder
 	reader := bufio.NewReader(strings.NewReader(raw))
+	
+	// First, collect all content that looks like valid JSON (ignoring length markers)
+	for {
+		line, err := reader.ReadString('\n')
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("read line: %w", err)
+		}
+
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		// Skip lines that look like chunk length markers
+		if _, err := strconv.Atoi(line); err == nil {
+			if debug {
+				fmt.Printf("Skipping length marker: %s\n", line)
+			}
+			continue
+		}
+
+		// Add anything that looks like it might be part of JSON
+		if strings.Contains(line, "[") || strings.Contains(line, "]") || 
+		   strings.Contains(line, "{") || strings.Contains(line, "}") {
+			allChunks.WriteString(line)
+			allChunks.WriteString("\n")
+		}
+	}
+
+	// Now try to extract valid JSON arrays from the collected content
+	fullContent := allChunks.String()
+	if debug {
+		fmt.Printf("Collected content: %s\n", fullContent[:min(100, len(fullContent))])
+	}
+
+	// Look for complete RPC responses in the entire content
+	matches := extractValidJSONArrays(fullContent)
+	if len(matches) > 0 {
+		for _, match := range matches {
+			// Process each potential JSON array
+			var rpcBatch [][]interface{}
+			if err := json.Unmarshal([]byte(match), &rpcBatch); err == nil {
+				if debug {
+					fmt.Printf("Successfully parsed RPC batch\n")
+				}
+				parseRPCBatch(rpcBatch, &responses)
+			} else {
+				if debug {
+					fmt.Printf("Failed to parse extracted array: %v\n", err)
+				}
+			}
+		}
+	}
+
+	// If we found any valid responses, return them
+	if len(responses) > 0 {
+		return responses, nil
+	}
+
+	// If no responses found, try the fallback approach to process chunks manually
+	var buffer strings.Builder
+	reader = bufio.NewReader(strings.NewReader(raw)) // Reset reader
 
 	for {
 		// Read the length line
@@ -264,12 +331,17 @@ func decodeChunkedResponse(raw string) ([]Response, error) {
 			continue
 		}
 
+			// Try to parse as an integer length
 		totalLength, err := strconv.Atoi(lengthStr)
 		if err != nil {
 			if debug {
 				fmt.Printf("Invalid length string: %q\n", lengthStr)
 			}
-			return nil, fmt.Errorf("invalid chunk length: invalid syntax")
+			
+			// If it doesn't look like a length, add it to our buffer
+			buffer.WriteString(lengthStr)
+			buffer.WriteString("\n")
+			continue
 		}
 
 		if debug {
@@ -285,7 +357,12 @@ func decodeChunkedResponse(raw string) ([]Response, error) {
 				fmt.Printf("Failed to read chunk: got %d bytes, wanted %d: %v\n",
 					n, totalLength, err)
 			}
-			return nil, fmt.Errorf("read chunk: %w", err)
+			
+			// Add whatever we did read to the buffer
+			if n > 0 {
+				buffer.Write(chunk[:n])
+			}
+			continue
 		}
 
 		if debug {
@@ -293,87 +370,50 @@ func decodeChunkedResponse(raw string) ([]Response, error) {
 				len(chunk), string(chunk[:min(50, len(chunk))]))
 		}
 
-		// First try to parse as regular JSON
-		var rpcBatch [][]interface{}
-		if err := json.Unmarshal(chunk, &rpcBatch); err != nil {
-			// If that fails, try unescaping the JSON string first
-			unescaped, err := strconv.Unquote("\"" + string(chunk) + "\"")
-			if err != nil {
-				if debug {
-					fmt.Printf("Failed to unescape chunk: %v\n", err)
-				}
-				return nil, fmt.Errorf("failed to parse chunk: %w", err)
-			}
-			if err := json.Unmarshal([]byte(unescaped), &rpcBatch); err != nil {
-				if debug {
-					fmt.Printf("Failed to parse unescaped chunk: %v\n", err)
-				}
-				return nil, fmt.Errorf("failed to parse chunk: %w", err)
+			// Add the chunk to our buffer
+		buffer.Write(chunk)
+	}
+
+	// Process the entire accumulated content
+	if buffer.Len() > 0 {
+		// Try one more extraction on the complete buffer
+		entireContent := buffer.String()
+		matches := extractValidJSONArrays(entireContent)
+		
+		for _, match := range matches {
+			var rpcBatch [][]interface{}
+			if err := json.Unmarshal([]byte(match), &rpcBatch); err == nil {
+				parseRPCBatch(rpcBatch, &responses)
 			}
 		}
+	}
 
-		// Process each RPC response in the batch
-		for _, rpcData := range rpcBatch {
-			if len(rpcData) < 7 {
+	// Alternative: check for a wrb.fr response in the complete buffer
+	if len(responses) == 0 {
+		content := buffer.String()
+		wrbIndex := strings.Index(content, "\"wrb.fr\"")
+		if wrbIndex > 0 {
+			// Find the array that contains this response
+			startIdx := strings.LastIndex(content[:wrbIndex], "[")
+			endIdx := findClosingBracket(content, startIdx)
+			
+			if startIdx >= 0 && endIdx > startIdx {
+				arrayContent := content[startIdx:endIdx+1]
 				if debug {
-					fmt.Printf("Skipping short RPC data: %v\n", rpcData)
+					fmt.Printf("Extracted potential RPC array: %s\n", arrayContent[:min(100, len(arrayContent))])
 				}
-				continue
-			}
-			rpcType, ok := rpcData[0].(string)
-			if !ok || rpcType != "wrb.fr" {
-				if debug {
-					fmt.Printf("Skipping non-wrb.fr RPC: %v\n", rpcData[0])
-				}
-				continue
-			}
-
-			id, _ := rpcData[1].(string)
-			resp := Response{
-				ID: id,
-			}
-
-			// Handle data - parse the nested JSON string
-			if rpcData[2] != nil {
-				if dataStr, ok := rpcData[2].(string); ok {
-					// Try to parse the data string
-					var data interface{}
-					if err := json.Unmarshal([]byte(dataStr), &data); err != nil {
-						// If direct parsing fails, try unescaping first
-						unescaped, err := strconv.Unquote("\"" + dataStr + "\"")
-						if err != nil {
-							if debug {
-								fmt.Printf("Failed to unescape data: %v\n", err)
-							}
-							continue
-						}
-						if err := json.Unmarshal([]byte(unescaped), &data); err != nil {
-							if debug {
-								fmt.Printf("Failed to parse unescaped data: %v\n", err)
-							}
-							continue
-						}
+				
+				// Try to process it as a single RPC
+				var singleRPC []interface{}
+				if err := json.Unmarshal([]byte(arrayContent), &singleRPC); err == nil {
+					if debug {
+						fmt.Printf("Parsed wrb.fr response as single RPC\n")
 					}
-					// Re-encode to get properly formatted JSON
-					rawData, err := json.Marshal(data)
-					if err != nil {
-						if debug {
-							fmt.Printf("Failed to re-encode response data: %v\n", err)
-						}
-						continue
-					}
-					resp.Data = rawData
+					parseRPCBatch([][]interface{}{singleRPC}, &responses)
+				} else if debug {
+					fmt.Printf("Failed to parse wrb.fr array: %v\n", err)
 				}
 			}
-
-			// Handle index
-			if rpcData[6] == "generic" {
-				resp.Index = 0
-			} else if indexStr, ok := rpcData[6].(string); ok {
-				resp.Index, _ = strconv.Atoi(indexStr)
-			}
-
-			responses = append(responses, resp)
 		}
 	}
 
@@ -384,26 +424,62 @@ func decodeChunkedResponse(raw string) ([]Response, error) {
 	return responses, nil
 }
 
-func handleChunk(chunk []byte, responses *[]Response) error {
-	if debug {
-		fmt.Printf("Processing chunk (%d bytes): %q\n", len(chunk),
-			string(chunk[:min(100, len(chunk))]))
+// findClosingBracket finds the matching closing bracket for an opening bracket at startIdx
+func findClosingBracket(s string, startIdx int) int {
+	if startIdx < 0 || startIdx >= len(s) || s[startIdx] != '[' {
+		return -1
 	}
-
-	// Parse the chunk
-	var rpcBatch [][]interface{}
-	if err := json.Unmarshal(chunk, &rpcBatch); err != nil {
-		return fmt.Errorf("parse chunk: %w", err)
-	}
-
-	// Process each RPC response in the batch
-	for _, rpcData := range rpcBatch {
-		if len(rpcData) < 7 {
-			if debug {
-				fmt.Printf("Skipping short RPC data: %v\n", rpcData)
+	
+	depth := 1
+	for i := startIdx + 1; i < len(s); i++ {
+		if s[i] == '[' {
+			depth++
+		} else if s[i] == ']' {
+			depth--
+			if depth == 0 {
+				return i
 			}
+		}
+	}
+	return -1
+}
+
+// extractValidJSONArrays attempts to find valid JSON arrays in a string
+func extractValidJSONArrays(content string) []string {
+	var results []string
+	
+	// Find all potential starting positions for JSON arrays
+	for i := 0; i < len(content); i++ {
+		if content[i] == '[' {
+			// Look for matching closing bracket
+			end := findClosingBracket(content, i)
+			if end > i {
+				// Extract the potential JSON array
+				array := content[i : end+1]
+				
+				// Check if it looks like an RPC batch (starts with [[)
+				if len(array) > 2 && array[:2] == "[[" {
+					results = append(results, array)
+				}
+				
+				// Skip ahead to after this array
+				i = end
+			}
+		}
+	}
+	
+	return results
+}
+
+// parseRPCBatch processes an RPC batch and adds valid responses to the provided slice
+func parseRPCBatch(rpcBatch [][]interface{}, responses *[]Response) {
+	for _, rpcData := range rpcBatch {
+		// Need at least type and id
+		if len(rpcData) < 2 {
 			continue
 		}
+		
+		// Check if this is a wrb.fr response
 		rpcType, ok := rpcData[0].(string)
 		if !ok || rpcType != "wrb.fr" {
 			if debug {
@@ -417,24 +493,24 @@ func handleChunk(chunk []byte, responses *[]Response) error {
 			ID: id,
 		}
 
-		// Handle data
-		if rpcData[2] != nil {
+		// Handle data - parse the nested JSON string if available
+		if len(rpcData) > 2 && rpcData[2] != nil {
 			if dataStr, ok := rpcData[2].(string); ok {
 				resp.Data = json.RawMessage(dataStr)
 			}
 		}
 
-		// Handle index
-		if rpcData[6] == "generic" {
-			resp.Index = 0
-		} else if indexStr, ok := rpcData[6].(string); ok {
-			resp.Index, _ = strconv.Atoi(indexStr)
+		// Handle index (if available)
+		if len(rpcData) >= 7 {
+			if rpcData[6] == "generic" {
+				resp.Index = 0
+			} else if indexStr, ok := rpcData[6].(string); ok {
+				resp.Index, _ = strconv.Atoi(indexStr)
+			}
 		}
 
 		*responses = append(*responses, resp)
 	}
-
-	return nil
 }
 
 func min(a, b int) int {
