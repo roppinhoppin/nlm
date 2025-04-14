@@ -6,17 +6,8 @@
 
 ## Installation 🚀
 
-### Option 1: Using Go Install (Recommended)
-
-The simplest way to install:
-
-```bash
-go install github.com/roppinhoppin/nlm/cmd/nlm@latest
-```
-
-### Option 2: Building from Source
-
-If you want to build from source or contribute to development:
+### Building from Source
+This is the only way i could find to successfully install the tool.
 
 ```bash
 # Clone the repository
@@ -29,6 +20,9 @@ go build -o nlm ./cmd/nlm
 # Install the binary to your GOPATH/bin directory
 go install ./cmd/nlm
 
+# if this does not work well, try authenticating again with:
+nlm auth
+
 # Or manually install to a location in your PATH
 # cp nlm $HOME/go/bin/
 ```
@@ -36,7 +30,7 @@ go install ./cmd/nlm
 After installation, verify that the command is accessible:
 
 ```bash
-nlm --version
+nlm -debug list
 ```
 
 Make sure your Go bin directory (typically `$GOPATH/bin` or `$HOME/go/bin`) is in your PATH.
