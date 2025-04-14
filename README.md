@@ -11,7 +11,7 @@
 The simplest way to install:
 
 ```bash
-go install github.com/tmc/nlm/cmd/nlm@latest
+go install github.com/roppinhoppin/nlm/cmd/nlm@latest
 ```
 
 ### Option 2: Building from Source
@@ -30,7 +30,7 @@ go build -o nlm ./cmd/nlm
 go install ./cmd/nlm
 
 # Or manually install to a location in your PATH
-# cp nlm $HOME/go/bin/
+# sudo cp nlm /usr/local/bin/
 ```
 
 After installation, verify that the command is accessible:
